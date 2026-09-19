@@ -34,11 +34,13 @@ void Log(std::ofstream& file, const std::string& text)
 
 DWORD FindRust()
 {
-    HANDLE snapshot = CreateToolhelp32Snapshot(
-        TH32CS_SNAPPROCESS, 0);
+    HANDLE snapshot =
+        CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
 
-    if (snapshot == INVALID_HANDLE_VALUE)
-        return 0;
+if (snapshot == INVALID_HANDLE_VALUE)
+{
+    return 0;
+}
 
     PROCESSENTRY32W entry{};
     entry.dwSize = sizeof(entry);
@@ -49,47 +51,17 @@ DWORD FindRust()
     {
         do
         {
-            if (_wcsicmp(
-                    entry.szExeFile,
-                    L"RustClient.exe") == 0)
+            if (_wcsicmp(entry.szExeFile, L"RustClient.exe") == 0)
             {
                 pid = entry.th32ProcessID;
                 break;
             }
-
-        } while (Process32NextW(snapshot, &entry));
+        }
+        while (Process32NextW(snapshot, &entry));
     }
 
     CloseHandle(snapshot);
     return pid;
-}
-
-std::set<std::wstring> GetModules(DWORD pid)
-{
-    std::set<std::wstring> modules;
-
-    HANDLE snapshot = CreateToolhelp32Snapshot(
-        TH32CS_SNAPMODULE |
-        TH32CS_SNAPMODULE32,
-        pid);
-
-    if (snapshot == INVALID_HANDLE_VALUE)
-        return modules;
-
-    MODULEENTRY32W module{};
-    module.dwSize = sizeof(module);
-
-    if (Module32FirstW(snapshot, &module))
-    {
-        do
-        {
-            modules.insert(module.szModule);
-
-        } while (Module32NextW(snapshot, &module));
-    }
-
-    CloseHandle(snapshot);
-    return modules;
 }
 
 std::string Narrow(const std::wstring& value)
@@ -125,6 +97,71 @@ std::string Narrow(const std::wstring& value)
     return result;
 }
 
+std::set<std::wstring> GetModules(
+    DWORD pid,
+    std::ofstream& log)
+{
+    std::set<std::wstring> modules;
+
+    SetLastError(ERROR_SUCCESS);
+
+    HANDLE snapshot =
+        CreateToolhelp32Snapshot(
+            TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32,
+            pid);
+
+    if (snapshot == INVALID_HANDLE_VALUE)
+    {
+        DWORD error = GetLastError();
+
+        Log(
+            log,
+            "Module enumeration FAILED. "
+            "GetLastError = " +
+            std::to_string(error));
+
+        return modules;
+    }
+
+    MODULEENTRY32W module{};
+    module.dwSize = sizeof(module);
+
+    if (!Module32FirstW(snapshot, &module))
+    {
+        DWORD error = GetLastError();
+
+        Log(
+            log,
+            "Module32FirstW FAILED. "
+            "GetLastError = " +
+            std::to_string(error));
+
+        CloseHandle(snapshot);
+        return modules;
+    }
+
+    do
+    {
+        modules.insert(module.szModule);
+
+    }
+    while (Module32NextW(snapshot, &module));
+
+    DWORD finalError = GetLastError();
+
+    CloseHandle(snapshot);
+
+    Log(
+        log,
+        "Module enumeration SUCCESS. "
+        "Module count = " +
+        std::to_string(modules.size()) +
+        ", final error = " +
+        std::to_string(finalError));
+
+    return modules;
+}
+
 int main()
 {
     std::ofstream log(
@@ -138,7 +175,9 @@ int main()
         return 1;
     }
 
-    Log(log, "Rust Monitor started.");
+    Log(log, "==============================");
+    Log(log, "Rust Monitor 2.0 started.");
+    Log(log, "==============================");
 
     DWORD pid = 0;
 
@@ -157,36 +196,57 @@ int main()
         "RustClient.exe detected. PID = " +
         std::to_string(pid));
 
-    std::set<std::wstring> previousModules =
-        GetModules(pid);
+    HANDLE process = OpenProcess(
+        PROCESS_QUERY_LIMITED_INFORMATION,
+        FALSE,
+        pid);
+
+    if (!process)
+    {
+        Log(
+            log,
+            "OpenProcess FAILED. GetLastError = " +
+            std::to_string(GetLastError()));
+    }
+    else
+    {
+        Log(log, "OpenProcess SUCCESS.");
+        CloseHandle(process);
+    }
+
+    auto previousModules =
+        GetModules(pid, log);
 
     for (const auto& module : previousModules)
     {
         Log(
             log,
-            "Module: " +
+            "Initial module: " +
             Narrow(module));
     }
 
     while (true)
     {
-        HANDLE process = OpenProcess(
+        HANDLE checkProcess = OpenProcess(
             PROCESS_QUERY_LIMITED_INFORMATION,
             FALSE,
             pid);
 
-        if (!process)
+        if (!checkProcess)
         {
             Log(
                 log,
-                "Rust process closed.");
+                "Rust process is no longer accessible. "
+                "GetLastError = " +
+                std::to_string(GetLastError()));
+
             break;
         }
 
-        CloseHandle(process);
+        CloseHandle(checkProcess);
 
         auto currentModules =
-            GetModules(pid);
+            GetModules(pid, log);
 
         for (const auto& module : currentModules)
         {
@@ -194,7 +254,7 @@ int main()
             {
                 Log(
                     log,
-                    "Module loaded: " +
+                    "Module appeared: " +
                     Narrow(module));
             }
         }
@@ -214,12 +274,10 @@ int main()
             std::move(currentModules);
 
         std::this_thread::sleep_for(
-            std::chrono::seconds(1));
+            std::chrono::seconds(2));
     }
 
-    Log(
-        log,
-        "Rust Monitor stopped.");
+    Log(log, "Rust Monitor stopped.");
 
     return 0;
 }
